@@ -1,0 +1,907 @@
+From 7649a8c7927418d3026111ba33d98c92cc3de568 Mon Sep 17 00:00:00 2001
+From: vedeka <noreply@anthropic.com>
+Date: Mon, 19 Oct 2026 06:26:14 +0000
+Subject: [PATCH] Add weather service (block 4) with outfit matching against
+ the wardrobe
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TWeZAPoa9npKTpz4AJgt5v
+---
+ README.md                         |  21 +-
+ services/weather/GUIDE.md         | 318 ++++++++++++++++++++++++++++++
+ services/weather/README.md        |  38 ++++
+ services/weather/check_compat.py  |  67 +++++++
+ services/weather/main.py          | 188 ++++++++++++++++++
+ services/weather/outfit_demo.py   | 194 ++++++++++++++++++
+ services/weather/requirements.txt |   3 +
+ 7 files changed, 828 insertions(+), 1 deletion(-)
+ create mode 100644 services/weather/GUIDE.md
+ create mode 100644 services/weather/README.md
+ create mode 100644 services/weather/check_compat.py
+ create mode 100644 services/weather/main.py
+ create mode 100644 services/weather/outfit_demo.py
+ create mode 100644 services/weather/requirements.txt
+
+diff --git a/README.md b/README.md
+index a1859d7d..7cfa798b 100644
+--- a/README.md
++++ b/README.md
+@@ -11,7 +11,7 @@ The project is built as small, independent services (phase 1):
+ | 1 | **Wardrobe** | Stores your clothes (the digital closet) + CRUD | ✅ built |
+ | 2 | Vision | Looks at a photo and labels the garment (color, type…) | ⬜ next |
+ | 3 | Embedding | Turns a photo into a vector for similarity search | ⬜ |
+-| 4 | Weather | Fetches the forecast for a place | ⬜ |
++| 4 | **Weather** | Forecast + what clothes each day needs (port 8004) | ✅ built |
+ 
+ ---
+ 
+@@ -61,3 +61,22 @@ Full details and examples: [`services/wardrobe/README.md`](services/wardrobe/REA
+ > Note: until the Vision service exists, uploads don't auto-detect the garment.
+ > You can add details manually via the `attributes_json` field, or leave them
+ > blank and the item is saved as `pending`.
++
++---
++
++## Block 4: Weather service
++
++Gets the forecast for a city and dates from Open-Meteo (free, no key) and says what
++each day needs from an outfit: warmth, types and materials to prefer or avoid,
++waterproof, evening layer. It never picks clothes itself.
++
++```bash
++cd wardrobe-ai/services/weather
++pip install -r requirements.txt
++python -m uvicorn main:app --reload --port 8004
++```
++
++Open **http://127.0.0.1:8004/docs**. With the wardrobe service also running,
++`python outfit_demo.py Goa --user u1` picks an outfit per day from that user's
++clothes. Details: [`services/weather/README.md`](services/weather/README.md) and
++[`services/weather/GUIDE.md`](services/weather/GUIDE.md).
+diff --git a/services/weather/GUIDE.md b/services/weather/GUIDE.md
+new file mode 100644
+index 00000000..a3e2a9f0
+--- /dev/null
++++ b/services/weather/GUIDE.md
+@@ -0,0 +1,318 @@
++# The weather service, explained in detail
++
++This guide explains everything you see at **http://localhost:8004**: what it is, how a request travels through it, every input and output, the clothing rules, the errors, and the code line by line.
++
++---
++
++## 1. The big picture
++
++The weather service is a **tiny website that runs on your own computer**. It doesn't show pages for people to read. Instead it answers questions with data, so other programs (your agents) can use it. A website like this is called an **API**.
++
++- **localhost** means "this computer". Nobody else can see it.
++- **8004** is the **port**, a numbered door on your computer. Each service gets its own door. Wardrobe uses 8001, vision 8002, embedding 8003 and weather 8004. These are the ports wardrobe-ai expects.
++- **uvicorn** is the program that keeps the service running and listens at that door. That's why PowerShell must stay open.
++- **FastAPI** is the Python library the code is written with. It also creates the `/docs` page for free.
++- **Open-Meteo** is the free weather website the service gets its forecasts from.
++
++The weather service's one job in your wardrobe app:
++
++> Given a place and some dates, say **what kind of clothes the weather calls for** on each day.
++
++It does **not** choose clothes from the wardrobe. That's the gap agent's job (see section 9).
++
++---
++
++## 2. What happens when you open /weather
++
++Say you open `http://localhost:8004/weather?city=Goa&days=4`.
++
++1. **Your browser** sends the request to door 8004 on your computer.
++2. **uvicorn** receives it and hands it to **FastAPI**.
++3. **FastAPI** sees the address is `/weather`, so it runs the `weather()` function in `main.py`. It reads `city=Goa` and `days=4` from the address and checks they're valid. For example, `days` must be a whole number from 1 to 16.
++4. Because a **city** was given, the code first asks **Open-Meteo's place search**: "Where is Goa?" The answer is coordinates (latitude and longitude) and a proper name, such as "Panaji, India".
++5. The code works out the **dates**: today plus the next 3 days. It checks they're not in the past and not more than 16 days ahead.
++6. It asks **Open-Meteo's forecast** for those coordinates and dates: the daily high, low and rain chance.
++7. For **each day** it adds:
++   - a **label**: hot, mild or cold
++   - **rainy**: yes or no
++   - **needs**: what the outfit should be like
++8. It adds a **trip** summary covering all the days.
++9. FastAPI sends everything back as **JSON** (a neat text format for data), and your browser shows it.
++
++All of this takes about a second.
++
++---
++
++## 3. The /docs page (your control panel)
++
++Open **http://localhost:8004/docs**. FastAPI builds this page automatically from the code. It lists every address and lets you try each one without typing URLs.
++
++How to use it:
++
++1. Click a row, for example **GET /weather**.
++2. Click **Try it out**. The input boxes become editable.
++3. Fill in the boxes you want, for example city = `Goa`. Leave the others empty.
++4. Click **Execute**.
++5. Scroll down to **Server response**:
++   - **Code** is the result code. **200** means success.
++   - **Response body** is the actual answer (the JSON).
++   - **Request URL** is the full address it called. You can copy it into a browser tab to get the same answer directly.
++
++The section below that, **Responses** (with "Example Value: string" and "422 Validation Error"), is **only documentation**. It describes what *could* come back. It is not your result, so it's normal for it to look generic.
++
++The **Schemas** box at the very bottom describes the format of error messages. You can ignore it.
++
++**GET** in the coloured badge means "this address only reads data, it doesn't change anything".
++
++---
++
++## 4. The three addresses
++
++| Address | What it does | Example |
++|---|---|---|
++| `/health` | Says the service is alive. Returns `{"ok": true}`. Useful later when one service checks another is running. | http://localhost:8004/health |
++| `/weather/vocabulary` | Lists the exact clothing words the service uses: **types** (t-shirt, jeans, sandals…), **materials** (cotton, wool…) and **warmth** (light, medium, warm, very_warm). The vision and wardrobe services should tag clothes with these same words, so everything matches. | http://localhost:8004/weather/vocabulary |
++| `/weather` | The main one: forecast plus clothing needs. | http://localhost:8004/weather?city=Goa |
++
++---
++
++## 5. Inputs for /weather
++
++All inputs are optional. They go after a `?` in the address, joined with `&`.
++
++| Input | Meaning | Default | Allowed |
++|---|---|---|---|
++| `city` | Place name. If given, `lat` and `lon` are ignored. | none | Any name Open-Meteo knows, e.g. Goa, Manali, Mumbai, Paris |
++| `lat` | Latitude, how far north the place is | 15.2993 (Goa) | Any number |
++| `lon` | Longitude, how far east the place is | 74.124 (Goa) | Any number |
++| `days` | How many days to show, starting from `start_date` | 4 | 1 to 16 |
++| `start_date` | First day | today | A date like `2026-10-20`, not in the past |
++| `end_date` | Last day | `start_date` + `days` − 1 | On or after `start_date`, within 16 days of today |
++
++Examples you can paste into your browser:
++
++- Goa, next 4 days: `http://localhost:8004/weather`
++- Goa, a whole week: `http://localhost:8004/weather?days=7`
++- Delhi by coordinates: `http://localhost:8004/weather?lat=28.61&lon=77.21`
++- Manali by name: `http://localhost:8004/weather?city=Manali`
++- A trip on specific dates: `http://localhost:8004/weather?city=Goa&start_date=2026-10-20&end_date=2026-10-23`
++
++Why only 16 days? Open-Meteo can't forecast further than that, and nobody can forecast weather reliably beyond about two weeks.
++
++When you search by city, always glance at `place` in the answer. Some names exist in several countries, and the search picks the most likely one.
++
++---
++
++## 6. The output, field by field
++
++Here's a real-shaped answer for Goa, showing two days. The numbers are from your own run earlier.
++
++```json
++{
++  "place": "Panaji, India",
++  "timezone": "Asia/Kolkata",
++  "days": [
++    {
++      "date": "2026-10-15",
++      "max": 37.1,
++      "min": 22.0,
++      "rain_chance": 2,
++      "label": "hot",
++      "rainy": false,
++      "needs": {
++        "warmth": "light",
++        "sleeves": "short",
++        "types_prefer": ["t-shirt", "shirt", "top", "kurta", "dress", "skirt", "shorts", "sandals"],
++        "types_avoid": ["sweater", "hoodie", "jacket", "coat", "boots"],
++        "materials_prefer": ["cotton", "linen", "rayon"],
++        "materials_avoid": ["wool", "fleece", "leather", "denim"],
++        "colors_prefer": ["light"],
++        "colors_avoid": [],
++        "waterproof": false,
++        "layer_for_evening": false,
++        "accessories": ["sunglasses", "cap or hat", "sunscreen"]
++      }
++    },
++    {
++      "date": "2026-10-17",
++      "max": 30.0,
++      "min": 25.2,
++      "rain_chance": 83,
++      "label": "mild",
++      "rainy": true,
++      "needs": {
++        "warmth": "medium",
++        "sleeves": "any",
++        "types_prefer": ["t-shirt", "shirt", "top", "kurta", "dress", "jeans", "trousers", "sneakers"],
++        "types_avoid": ["coat"],
++        "materials_prefer": ["cotton", "linen", "rayon", "polyester", "nylon"],
++        "materials_avoid": ["fleece", "suede", "silk"],
++        "colors_prefer": [],
++        "colors_avoid": ["white"],
++        "waterproof": true,
++        "layer_for_evening": false,
++        "accessories": ["umbrella or raincoat"]
++      }
++    }
++  ],
++  "trip": {
++    "warmth_levels": ["light", "medium"],
++    "rainy_days": 1,
++    "needs_evening_layer": false,
++    "needs_waterproof": true,
++    "accessories": ["cap or hat", "sunglasses", "sunscreen", "umbrella or raincoat"]
++  }
++}
++```
++
++### Top level
++
++| Field | Meaning |
++|---|---|
++| `place` | Where the forecast is for. The real place name when you used `city`, or the coordinates otherwise. |
++| `timezone` | The local timezone of that place. Dates follow local time, so a trip to London shows London dates. |
++| `days` | A list with one entry per day. |
++| `trip` | A summary of all the days together, for packing. |
++
++### Each day
++
++| Field | Meaning |
++|---|---|
++| `date` | The day, in year-month-day format. |
++| `max` | Highest temperature that day, in °C. |
++| `min` | Lowest temperature, usually at night or early morning, in °C. |
++| `rain_chance` | Highest chance of rain during the day, in %. |
++| `label` | **hot** if `max` is 32 or above, **cold** if `max` is below 20, otherwise **mild**. |
++| `rainy` | **true** if `rain_chance` is 60% or more. |
++| `needs` | What that day's outfit should be like. See below. |
++
++### Inside `needs`
++
++| Field | Meaning | How the gap agent uses it |
++|---|---|---|
++| `warmth` | How warm the clothes should be: light, medium, warm or very_warm | Gives a bonus to clothes with the same warmth |
++| `sleeves` | short, long or any | Preference for tops |
++| `types_prefer` | Kinds of clothes that suit the day | Bonus points |
++| `types_avoid` | Kinds of clothes that don't suit it | Removed completely |
++| `materials_prefer` | Fabrics that suit the day | Bonus points |
++| `materials_avoid` | Fabrics that don't suit it | Removed completely |
++| `colors_prefer` | e.g. "light" colours on hot days (they stay cooler) | Bonus points |
++| `colors_avoid` | e.g. white on rainy days (it shows mud and goes see-through) | Removed completely |
++| `waterproof` | true on rainy days | Leather and suede shoes removed |
++| `layer_for_evening` | true if nights get cool (below 18°C on mild days, always on cold days) | Adds a sweater or jacket to the outfit |
++| `accessories` | Things to carry: sunglasses, umbrella, scarf… | Shown next to the outfit |
++
++### Inside `trip`
++
++| Field | Meaning |
++|---|---|
++| `warmth_levels` | Every warmth level needed across the trip. For example light and medium means pack mostly light clothes plus a few medium ones. |
++| `rainy_days` | How many days are rainy |
++| `needs_evening_layer` | Pack at least one sweater or jacket |
++| `needs_waterproof` | Pack waterproof shoes or an umbrella |
++| `accessories` | Every accessory needed on any day |
++
++---
++
++## 7. The clothing rules
++
++These are simple **if-then rules**, written in the `clothing_needs` function. They're easy to change: edit the lists in `main.py`.
++
++### By temperature (based on the day's high)
++
++| | Hot (32°C and up) | Mild (20–31.9°C) | Cold (below 20°C) | Very cold (below 10°C) |
++|---|---|---|---|---|
++| Warmth | light | medium | warm | very_warm |
++| Sleeves | short | any | long | long |
++| Prefer types | t-shirt, shirt, top, kurta, dress, skirt, shorts, sandals | t-shirt, shirt, top, kurta, dress, jeans, trousers, sneakers | sweater, hoodie, jacket, jeans, trousers, shoes, boots | same as cold, plus coat |
++| Avoid types | sweater, hoodie, jacket, coat, boots | coat | shorts, sandals, skirt | shorts, sandals, skirt |
++| Prefer materials | cotton, linen, rayon | cotton, linen, denim, rayon | wool, fleece, denim | wool, fleece, denim |
++| Avoid materials | wool, fleece, leather, denim | fleece | linen | linen |
++| Evening layer | no | only if the low is below 18°C | yes | yes |
++| Accessories | sunglasses, cap or hat, sunscreen | none | none | scarf, gloves |
++
++### Extra rules when it's rainy (60% or more)
++
++- `waterproof` becomes true.
++- Quick-dry materials (polyester, nylon) are added to the preferred list, and denim is removed from it because it stays wet for hours.
++- Suede and silk are added to the avoid list, because rain ruins them.
++- White is added to `colors_avoid`.
++- An umbrella or raincoat is added to accessories.
++
++---
++
++## 8. Errors and what they mean
++
++The service always explains what went wrong in a `detail` message.
++
++| Code | Meaning | Example cause | What to do |
++|---|---|---|---|
++| **200** | Success | | |
++| **400** | Your dates don't work | `start_date` in the past, `end_date` before `start_date`, or dates more than 16 days ahead | Fix the dates. The message says the last allowed date. |
++| **404** | City not found | `city=Nowhereville` | Check the spelling or use `lat` and `lon` |
++| **422** | Input in the wrong format | `days=abc`, `days=20`, `start_date=20th Oct` | Use numbers for days (1 to 16) and dates like `2026-10-20` |
++| **502** | Open-Meteo refused the request | Rare. Usually odd coordinates. | Read the reason in the message |
++| **503** | Open-Meteo can't be reached | No internet, or Open-Meteo is down | Check your internet and try again |
++
++These clear messages matter for the agents. The critic or planner can read "city not found" and ask the user again, instead of crashing.
++
++---
++
++## 9. How it fits into the wardrobe app
++
++```
++User: "4-day trip to Goa next week, what should I wear?"
++        │
++   Planner agent ── works out: city = Goa, dates = 20–23 Oct
++        │
++   Context agent ── calls /weather?city=Goa&start_date=...&end_date=...
++        │              gets each day's "needs"
++   Wardrobe ─────── the user's clothes, each tagged by the vision service
++        │              with type, material, colour and warmth
++   Gap agent ────── for each day and each slot (top, bottom, shoes):
++        │              1. remove clothes the needs say to avoid
++        │              2. score the rest: preferred type +2, preferred material +2, same warmth +1
++        │              3. pick the best item; if nothing is left, suggest something to buy
++   Composer ─────── adds the occasion (office, festival, trip) and the user's preferences
++        │
++   Critic ───────── checks the outfit; if it fails, sends it back to try again
++```
++
++`outfit_demo.py` in this folder is a working example of the gap agent step, using a 7-item sample wardrobe. Run it in a second PowerShell window while the weather service is running:
++
++```
++python outfit_demo.py Goa
++```
++
++---
++
++## 10. The code, section by section (`main.py`)
++
++| Part | What it does |
++|---|---|
++| `import ...` | Loads the tools: dates, `httpx` (calls other websites) and FastAPI. |
++| `app = FastAPI(...)` | Creates the web service. `uvicorn main:app` means "run the `app` in `main.py`". |
++| `FORECAST_URL`, `GEOCODE_URL` | The two Open-Meteo addresses: forecast, and place search. |
++| `MAX_DAYS_AHEAD = 16` | The forecast limit, kept in one place. |
++| `@app.get("/health")` | The `@app.get(...)` line above a function connects that function to an address. |
++| `call_open_meteo()` | Calls Open-Meteo and turns any problem into a clear error (503 or 502) instead of a crash. It waits at most 10 seconds. |
++| `find_city()` | Turns a city name into coordinates using the place search. Returns 404 if nothing is found. |
++| `temperature_label()` | The hot, mild or cold rule. |
++| `TYPES`, `MATERIALS`, `WARMTH` | The shared clothing vocabulary. |
++| `clothing_needs()` | The rules in section 7. Takes the high, the low and whether it's rainy, and returns the `needs`. |
++| `trip_summary()` | Combines all the days' needs into the `trip` block. |
++| `@app.get("/weather/vocabulary")` | Returns the vocabulary lists. |
++| `@app.get("/weather")` | The main function. Reads your inputs (FastAPI checks types and limits, which is where 422 errors come from), finds the city, works out and checks the dates, calls the forecast, then builds each day and the trip summary. |
++
++---
++
++## 11. Glossary
++
++- **API**: a website meant for programs, not people. It answers with data.
++- **Endpoint / address / route**: one URL of the API, such as `/weather`.
++- **Query parameters**: the inputs after `?` in a URL, such as `?city=Goa&days=7`.
++- **JSON**: the text format of the answers. `{ }` holds named fields and `[ ]` holds lists.
++- **localhost:8004**: this computer, door 8004.
++- **Status code**: a number saying how the request went. 200 is OK, 4xx means a problem with the input, 5xx means a problem on the server or weather site.
++- **uvicorn**: the program that runs the service. Stop it with Ctrl+C.
++- **`--reload`**: makes uvicorn restart automatically when you save `main.py`.
+diff --git a/services/weather/README.md b/services/weather/README.md
+new file mode 100644
+index 00000000..dc4a0d5f
+--- /dev/null
++++ b/services/weather/README.md
+@@ -0,0 +1,38 @@
++# Weather service
++
++A tiny web service that gives a short forecast (default: Goa, next 4 days) with a hot / mild / cold label per day. Data comes free from Open-Meteo, no key needed.
++
++## Run it
++
++Open a terminal in this `weather` folder, then:
++
++```
++pip install -r requirements.txt
++uvicorn main:app --reload --port 8004
++```
++
++Wait for "Application startup complete", then open http://localhost:8004/docs in your browser.
++
++## Try it
++
++- http://localhost:8004/weather gives 4 days for Goa
++- http://localhost:8004/weather?days=7 gives 7 days
++- http://localhost:8004/weather?lat=28.61&lon=77.21 gives Delhi
++- http://localhost:8004/weather?city=Manali searches by city name
++- http://localhost:8004/weather?city=Goa&start_date=2026-10-20&end_date=2026-10-23 plans a trip (dates up to 16 days ahead)
++
++- http://localhost:8004/weather/vocabulary lists the clothing words (types, materials, warmth) the service uses
++
++Each day also has `rainy` (rain chance 60% or more) and `needs`: what the weather asks of an outfit (warmth, sleeves, types and materials to prefer or avoid, waterproof, evening layer, accessories). It doesn't pick clothes; the gap agent matches `needs` against the user's wardrobe, and anything missing becomes a buying suggestion. The `trip` block rolls all days up for packing.
++
++The vision service should tag uploaded clothes with the same words as `/weather/vocabulary`, so matching is a simple lookup.
++
++Python 3.10 or newer is needed.
++
++Labels: hot if the max is 32°C or more, cold if under 20°C, mild otherwise.
++
++## Using it with wardrobe-ai
++
++The wardrobe service (github.com/Devanshi-Jhawar/wardrobe-ai) runs on port 8001 and expects vision on 8002 and embedding on 8003, so weather runs on **8004**.
++
++With both running, `python outfit_demo.py Goa --user u1` reads user u1's clothes from the wardrobe and picks outfits for the Goa forecast. `CATEGORY_MAP` in outfit_demo.py translates each wardrobe category (Kurti, Saree, Jeans…) into the weather vocabulary. Items still "pending" (no category yet) and accessories are skipped.
+diff --git a/services/weather/check_compat.py b/services/weather/check_compat.py
+new file mode 100644
+index 00000000..ec8ee570
+--- /dev/null
++++ b/services/weather/check_compat.py
+@@ -0,0 +1,67 @@
++"""Check that the weather service and a running wardrobe-ai service still fit together.
++
++Run it from the weather folder. Start both services first (wardrobe on 8001, weather on 8004), then run:
++    python check_compat.py u1
++where u1 is a user_id that has some clothes uploaded.
++"""
++import sys
++
++import httpx
++
++from outfit_demo import CATEGORY_MAP
++
++WARDROBE = "http://localhost:8001"
++WEATHER = "http://localhost:8004"
++
++
++def check(name, ok, detail=""):
++    print(f"[{'OK' if ok else 'PROBLEM'}] {name}{': ' + detail if detail else ''}")
++    return ok
++
++
++def main():
++    user = sys.argv[1] if len(sys.argv) > 1 else "u1"
++    all_ok = True
++
++    try:
++        w = httpx.get(f"{WARDROBE}/health", timeout=5).json()
++        all_ok &= check("wardrobe service is running on 8001", True)
++        all_ok &= check("wardrobe enrichment setting", True,
++                        f"enrichment={w.get('enrichment')} (vision is expected on 8002, embedding on 8003)")
++    except httpx.HTTPError:
++        check("wardrobe service is running on 8001", False, "start it with: uvicorn app.main:app --port 8001")
++        return
++
++    try:
++        httpx.get(f"{WEATHER}/health", timeout=5).raise_for_status()
++        all_ok &= check("weather service is running on 8004", True)
++    except httpx.HTTPError:
++        all_ok &= check("weather service is running on 8004", False,
++                        "start it with: python -m uvicorn main:app --port 8004")
++
++    r = httpx.get(f"{WARDROBE}/wardrobe/items", params={"user_id": user, "limit": 200}, timeout=10)
++    if not check("GET /wardrobe/items still works", r.status_code == 200, f"status {r.status_code}"):
++        return
++    data = r.json()
++    if not check("response still has 'items'", "items" in data):
++        return
++    items = data["items"]
++    check(f"user '{user}' has clothes", bool(items), f"{len(items)} item(s)")
++
++    needed = {"id", "category", "color", "material"}
++    missing_fields = needed - set(items[0]) if items else set()
++    all_ok &= check("items still have id, category, color, material", not missing_fields,
++                    f"missing {sorted(missing_fields)}" if missing_fields else "")
++
++    pending = [i for i in items if not i.get("category")]
++    check("items with a category", True, f"{len(items) - len(pending)} tagged, {len(pending)} still pending")
++
++    unknown = sorted({i["category"] for i in items if i.get("category") and i["category"] not in CATEGORY_MAP})
++    all_ok &= check("every category is in CATEGORY_MAP", not unknown,
++                    f"add these to CATEGORY_MAP in outfit_demo.py: {unknown}" if unknown else "")
++
++    print("\nAll good, ready to connect." if all_ok else "\nFix the PROBLEM lines above, then run this again.")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/services/weather/main.py b/services/weather/main.py
+new file mode 100644
+index 00000000..3828e4bd
+--- /dev/null
++++ b/services/weather/main.py
+@@ -0,0 +1,188 @@
++from datetime import date, timedelta
++
++import httpx
++from fastapi import FastAPI, HTTPException, Query
++
++app = FastAPI(title="Weather service")
++
++FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
++GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
++MAX_DAYS_AHEAD = 16  # Open-Meteo only forecasts this far ahead
++
++
++@app.get("/health")
++def health():
++    return {"ok": True}
++
++
++def call_open_meteo(url, params):
++    """Call Open-Meteo and turn any problem into a clear error message."""
++    try:
++        r = httpx.get(url, params=params, timeout=10)
++    except httpx.HTTPError:
++        raise HTTPException(503, "Weather website is not reachable right now. Try again later.")
++    if r.status_code != 200:
++        try:
++            reason = r.json().get("reason", "unknown problem")
++        except ValueError:
++            reason = "unknown problem"
++        raise HTTPException(502, f"Weather website refused the request: {reason}")
++    return r.json()
++
++
++def find_city(name):
++    """Turn a city name like 'Goa' into coordinates."""
++    data = call_open_meteo(GEOCODE_URL, {"name": name, "count": 1})
++    if not data.get("results"):
++        raise HTTPException(404, f"Could not find a place called '{name}'.")
++    place = data["results"][0]
++    return place["latitude"], place["longitude"], f"{place['name']}, {place.get('country', '')}".strip(", ")
++
++
++def temperature_label(high):
++    if high >= 32:
++        return "hot"
++    if high < 20:
++        return "cold"
++    return "mild"
++
++
++# Shared words for clothing. The vision service should tag uploaded clothes
++# with these same words, so the gap agent can match weather needs to the wardrobe.
++TYPES = ["t-shirt", "shirt", "top", "kurta", "dress", "skirt", "shorts", "jeans",
++         "trousers", "sweater", "hoodie", "jacket", "coat", "sandals", "sneakers", "shoes", "boots"]
++MATERIALS = ["cotton", "linen", "rayon", "polyester", "denim", "wool", "fleece",
++             "leather", "suede", "silk", "nylon"]
++WARMTH = ["light", "medium", "warm", "very_warm"]
++
++
++def clothing_needs(high, low, rainy):
++    """Rule-based description of what the day's weather needs from an outfit.
++
++    It never names a specific garment from the wardrobe; the gap agent matches
++    these needs against the user's uploaded clothes.
++    """
++    label = temperature_label(high)
++    if label == "hot":
++        needs = {
++            "warmth": "light",
++            "sleeves": "short",
++            "types_prefer": ["t-shirt", "shirt", "top", "kurta", "dress", "skirt", "shorts", "sandals"],
++            "types_avoid": ["sweater", "hoodie", "jacket", "coat", "boots"],
++            "materials_prefer": ["cotton", "linen", "rayon"],
++            "materials_avoid": ["wool", "fleece", "leather", "denim"],
++            "colors_prefer": ["light"],
++            "layer_for_evening": False,
++            "accessories": ["sunglasses", "cap or hat", "sunscreen"],
++        }
++    elif label == "mild":
++        needs = {
++            "warmth": "medium",
++            "sleeves": "any",
++            "types_prefer": ["t-shirt", "shirt", "top", "kurta", "dress", "jeans", "trousers", "sneakers"],
++            "types_avoid": ["coat"],
++            "materials_prefer": ["cotton", "linen", "denim", "rayon"],
++            "materials_avoid": ["fleece"],
++            "colors_prefer": [],
++            "layer_for_evening": low < 18,
++            "accessories": [],
++        }
++    else:
++        very_cold = high < 10
++        needs = {
++            "warmth": "very_warm" if very_cold else "warm",
++            "sleeves": "long",
++            "types_prefer": ["sweater", "hoodie", "jacket", "jeans", "trousers", "shoes", "boots"]
++                            + (["coat"] if very_cold else []),
++            "types_avoid": ["shorts", "sandals", "skirt"],
++            "materials_prefer": ["wool", "fleece", "denim"],
++            "materials_avoid": ["linen"],
++            "colors_prefer": [],
++            "layer_for_evening": True,
++            "accessories": ["scarf", "gloves"] if very_cold else [],
++        }
++
++    needs["waterproof"] = rainy
++    if rainy:
++        needs["materials_prefer"] = [m for m in needs["materials_prefer"] if m != "denim"] + ["polyester", "nylon"]
++        needs["materials_avoid"] = needs["materials_avoid"] + ["suede", "silk"]
++        needs["colors_avoid"] = ["white"]
++        needs["accessories"] = needs["accessories"] + ["umbrella or raincoat"]
++    else:
++        needs["colors_avoid"] = []
++    return needs
++
++
++def trip_summary(days):
++    """Roll the daily needs up into one view of the whole trip, for packing."""
++    needs = [d["needs"] for d in days]
++    return {
++        "warmth_levels": [w for w in WARMTH if any(n["warmth"] == w for n in needs)],
++        "rainy_days": sum(d["rainy"] for d in days),
++        "needs_evening_layer": any(n["layer_for_evening"] for n in needs),
++        "needs_waterproof": any(n["waterproof"] for n in needs),
++        "accessories": sorted({a for n in needs for a in n["accessories"]}),
++    }
++
++
++@app.get("/weather/vocabulary")
++def vocabulary():
++    """The clothing words this service uses, for the vision service to share."""
++    return {"types": TYPES, "materials": MATERIALS, "warmth": WARMTH}
++
++
++@app.get("/weather")
++def weather(
++    city: str | None = Query(None, description="City name, e.g. Goa. Used instead of lat/lon."),
++    lat: float = 15.2993,
++    lon: float = 74.124,
++    days: int = Query(4, ge=1, le=MAX_DAYS_AHEAD),
++    start_date: date | None = Query(None, description="First day of the trip, e.g. 2026-10-20. Default: today."),
++    end_date: date | None = Query(None, description="Last day of the trip. Default: start_date + days - 1."),
++):
++    place = None
++    if city:
++        lat, lon, place = find_city(city)
++
++    today = date.today()
++    start = start_date or today
++    end = end_date or start + timedelta(days=days - 1)
++    last_allowed = today + timedelta(days=MAX_DAYS_AHEAD - 1)
++    if end < start:
++        raise HTTPException(400, "end_date must be on or after start_date.")
++    if start < today - timedelta(days=1):
++        raise HTTPException(400, "start_date is in the past.")
++    if end > last_allowed:
++        raise HTTPException(400, f"Forecasts only go {MAX_DAYS_AHEAD} days ahead. Pick dates up to {last_allowed}.")
++
++    data = call_open_meteo(FORECAST_URL, {
++        "latitude": lat, "longitude": lon,
++        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max",
++        "timezone": "auto",
++        "start_date": start.isoformat(),
++        "end_date": end.isoformat(),
++    })
++    d = data["daily"]
++
++    result = []
++    for i in range(len(d["time"])):
++        high = d["temperature_2m_max"][i]
++        low = d["temperature_2m_min"][i]
++        rain = d["precipitation_probability_max"][i] or 0
++        rainy = rain >= 60
++        result.append({
++            "date": d["time"][i],
++            "max": high,
++            "min": low,
++            "rain_chance": rain,
++            "label": temperature_label(high),
++            "rainy": rainy,
++            "needs": clothing_needs(high, low, rainy),
++        })
++
++    return {
++        "place": place or f"{lat}, {lon}",
++        "timezone": data.get("timezone"),
++        "days": result,
++        "trip": trip_summary(result),
++    }
+diff --git a/services/weather/outfit_demo.py b/services/weather/outfit_demo.py
+new file mode 100644
+index 00000000..ed350cce
+--- /dev/null
++++ b/services/weather/outfit_demo.py
+@@ -0,0 +1,194 @@
++"""Demo: how the gap agent will use the weather service's `needs`.
++
++Run the weather service first (uvicorn main:app --port 8004), then in a
++second terminal:
++
++    python outfit_demo.py Goa              # uses the sample wardrobe below
++    python outfit_demo.py Goa --user u1    # uses your real wardrobe-ai service (port 8001)
++"""
++import sys
++
++import httpx
++
++WEATHER_URL = "http://localhost:8004/weather"
++WARDROBE_URL = "http://localhost:8001/wardrobe/items"
++
++# Sample wardrobe, already in the shared vocabulary from /weather/vocabulary.
++SAMPLE_WARDROBE = [
++    {"name": "white linen shirt", "slot": "top", "type": "shirt", "material": "linen", "color": ["white"], "warmth": "light"},
++    {"name": "blue cotton t-shirt", "slot": "top", "type": "t-shirt", "material": "cotton", "color": ["blue"], "warmth": "light"},
++    {"name": "grey wool sweater", "slot": "top", "type": "sweater", "material": "wool", "color": ["grey"], "warmth": "warm"},
++    {"name": "black denim jeans", "slot": "bottom", "type": "jeans", "material": "denim", "color": ["black"], "warmth": "medium"},
++    {"name": "beige cotton shorts", "slot": "bottom", "type": "shorts", "material": "cotton", "color": ["beige"], "warmth": "light"},
++    {"name": "brown leather sandals", "slot": "footwear", "type": "sandals", "material": "leather", "color": ["brown"], "warmth": "light"},
++    {"name": "white sneakers", "slot": "footwear", "type": "sneakers", "material": "polyester", "color": ["white"], "warmth": "medium"},
++]
++
++# wardrobe-ai stores the YOLO category (e.g. "Kurti"). This table translates each
++# one into the weather vocabulary: (slot, type, warmth).
++# "one-piece" fills top and bottom; "layer" is worn over a top.
++CATEGORY_MAP = {
++    "T-Shirt": ("top", "t-shirt", "light"),
++    "Shirt": ("top", "shirt", "light"),
++    "Kurti": ("top", "kurta", "light"),
++    "Kameez": ("top", "kurta", "light"),
++    "Hoodie": ("layer", "hoodie", "warm"),
++    "Jacket": ("layer", "jacket", "warm"),
++    "Blazer": ("layer", "jacket", "medium"),
++    "Dress": ("one-piece", "dress", "light"),
++    "Maxi": ("one-piece", "dress", "light"),
++    "Saree": ("one-piece", "dress", "light"),
++    "Anarkali": ("one-piece", "dress", "medium"),
++    "Lehenga": ("one-piece", "dress", "medium"),
++    "Sherwani": ("one-piece", "kurta", "warm"),
++    "Jeans": ("bottom", "jeans", "medium"),
++    "Skirt": ("bottom", "skirt", "light"),
++    "Shalwar": ("bottom", "trousers", "light"),
++    "Sharara": ("bottom", "trousers", "light"),
++    "Shoes": ("footwear", "shoes", "medium"),
++    "Slippers": ("footwear", "sandals", "light"),
++    # Accessories aren't matched to weather yet.
++    "Dupatta": ("accessory", None, None),
++    "Bag": ("accessory", None, None),
++    "Jewellery": ("accessory", None, None),
++    "Sunglasses": ("accessory", None, None),
++}
++
++SLOTS = ["top", "bottom", "footwear"]
++LAYERS = ("sweater", "hoodie", "jacket", "coat")
++SLOT_TYPES = {
++    "top": ["t-shirt", "shirt", "top", "kurta", "dress", "sweater", "hoodie"],
++    "bottom": ["shorts", "skirt", "jeans", "trousers"],
++    "footwear": ["sandals", "sneakers", "shoes", "boots"],
++}
++
++
++def from_wardrobe_item(item):
++    """Turn one wardrobe-ai item into the shape the matching rules use."""
++    if not item.get("category") or item["category"] not in CATEGORY_MAP:
++        return None  # not tagged yet ("pending"), or a category we don't map
++    slot, type_, warmth = CATEGORY_MAP[item["category"]]
++    if slot == "accessory":
++        return None
++    colors = [c.lower() for c in (item.get("color") or [])]
++    material = (item.get("material") or "").lower() or None
++    label = " ".join(colors[:1] + ([material] if material else []) + [item["category"]])
++    return {"name": label, "id": item["id"], "slot": slot, "type": type_,
++            "material": material, "color": colors, "warmth": warmth}
++
++
++def load_wardrobe(user_id):
++    r = httpx.get(WARDROBE_URL, params={"user_id": user_id, "limit": 200}, timeout=20)
++    r.raise_for_status()
++    items = r.json()["items"]
++    converted = [from_wardrobe_item(i) for i in items]
++    usable = [c for c in converted if c]
++    skipped = len(items) - len(usable)
++    if skipped:
++        print(f"({skipped} item(s) skipped: not tagged yet, or accessories)\n")
++    return usable
++
++
++def buy_suggestion(slot, needs):
++    """Describe what to buy for an empty slot, in the shared vocabulary."""
++    types = [t for t in needs["types_prefer"] if t in SLOT_TYPES[slot]] or SLOT_TYPES[slot][:2]
++    if slot == "footwear":
++        extra = "waterproof (floaters, rubber)" if needs["waterproof"] else ""
++    else:
++        extra = "in " + " or ".join(needs["materials_prefer"][:2])
++    return f"{slot}: {' or '.join(types[:2])} {extra}".strip()
++
++
++def fits(item, needs):
++    """Hard rules: drop anything the weather says to avoid."""
++    if item["type"] in needs["types_avoid"]:
++        return False
++    # Fabric rules are for clothes; shoes only follow the rain rule below.
++    if item["slot"] != "footwear" and item["material"] in needs["materials_avoid"]:
++        return False
++    if any(c in needs["colors_avoid"] for c in item["color"]):
++        return False
++    if needs["waterproof"] and item["slot"] == "footwear" and item["material"] in ("leather", "suede"):
++        return False
++    return True
++
++
++def score(item, needs):
++    """Soft rules: rank what's left by how well it suits the weather."""
++    s = 0
++    s += 2 if item["type"] in needs["types_prefer"] else 0
++    s += 2 if item["material"] in needs["materials_prefer"] else 0
++    s += 1 if item["warmth"] == needs["warmth"] else 0
++    return s
++
++
++def best(wardrobe, slots, needs):
++    options = [i for i in wardrobe if i["slot"] in slots and fits(i, needs)]
++    return max(options, key=lambda i: score(i, needs)) if options else None
++
++
++def outfit_for_day(day, wardrobe):
++    needs = day["needs"]
++    picks, missing = {}, []
++
++    # A dress, saree etc. counts as top and bottom together.
++    top = best(wardrobe, ("top", "one-piece"), needs)
++    if top:
++        picks["top" if top["slot"] == "top" else "outfit"] = top
++    else:
++        missing.append(buy_suggestion("top", needs))
++    if not top or top["slot"] != "one-piece":
++        bottom = best(wardrobe, ("bottom",), needs)
++        if bottom:
++            picks["bottom"] = bottom
++        else:
++            missing.append(buy_suggestion("bottom", needs))
++    shoes = best(wardrobe, ("footwear",), needs)
++    if shoes:
++        picks["footwear"] = shoes
++    else:
++        missing.append(buy_suggestion("footwear", needs))
++
++    top_is_layer = top is not None and top["type"] in LAYERS
++    if needs["layer_for_evening"] and not top_is_layer:
++        layers = [i for i in wardrobe if i["type"] in LAYERS and fits(i, needs)]
++        if layers:
++            picks["evening layer"] = layers[0]
++        else:
++            missing.append("evening layer: light jacket or sweater")
++    return picks, missing
++
++
++def main():
++    args = sys.argv[1:]
++    user = None
++    if "--user" in args:
++        i = args.index("--user")
++        user = args[i + 1]
++        args = args[:i] + args[i + 2:]
++    city = args[0] if args else "Goa"
++
++    wardrobe = load_wardrobe(user) if user else SAMPLE_WARDROBE
++    if not wardrobe:
++        print("No tagged clothes found. Upload items with a category first.")
++        return
++
++    r = httpx.get(WEATHER_URL, params={"city": city, "days": 4}, timeout=20)
++    r.raise_for_status()
++    data = r.json()
++    print(f"Outfits for {data['place']}\n")
++    for day in data["days"]:
++        picks, missing = outfit_for_day(day, wardrobe)
++        rain = ", rainy" if day["rainy"] else ""
++        print(f"{day['date']}  {day['max']}°C {day['label']}{rain}")
++        for slot, item in picks.items():
++            print(f"   {slot:14} {item['name']}")
++        for m in missing:
++            print(f"   BUY  {m}")
++        if day["needs"]["accessories"]:
++            print(f"   carry          {', '.join(day['needs']['accessories'])}")
++        print()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/services/weather/requirements.txt b/services/weather/requirements.txt
+new file mode 100644
+index 00000000..d23d558d
+--- /dev/null
++++ b/services/weather/requirements.txt
+@@ -0,0 +1,3 @@
++fastapi
++uvicorn
++httpx
+-- 
+2.43.0
+
